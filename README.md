@@ -64,31 +64,33 @@ Box auto-detects the container environment:
 - `-ro PATH` - Mount directory as read-only
 - `-rw PATH` - Mount directory as read-write
 
+**Note**: The first mounted directory becomes the working directory inside the container.
+
 ## Examples
 
 ### Node.js Development
 
 ```bash
-box npm install                    # Auto-detects Node.js
-box -V 18 npm test                 # Specific Node version
-box -t -p 3000 npm run dev         # With tmux and port mapping
-box -rw ./src npm run build        # Mount source code
+box -rw . npm install              # Mount current directory and install
+box -rw . -V 18 npm test           # Run tests with Node 18
+box -rw . -t -p 3000 npm run dev   # Dev server with code access
+box -rw ./src npm run build        # Mount source code for build
 ```
 
 ### Python Development
 
 ```bash
-box python script.py               # Auto-detects Python
-box -V 3.9 python -m pytest        # Specific Python version
-box -rw ./app -p 8000 python manage.py runserver
-box -t python                      # Interactive with tmux
+box -rw . python script.py         # Run script with access to current dir
+box -rw . -V 3.9 python -m pytest  # Run tests with Python 3.9
+box -rw ./app -p 8000 python manage.py runserver  # Django with app dir as working dir
+box -rw . -t python                # Interactive Python in current dir
 ```
 
 ### Volume Mounting
 
 ```bash
-box -ro ~/data/input -rw ~/data/output python process.py
-box -ro ~/datasets:data -rw ~/results:output python analyze.py
+box -ro ~/data/input -rw ~/data/output python process.py  # Working dir: ~/data/input
+box -ro ~/datasets:/data -rw ~/results:/output python analyze.py  # Working dir: /data
 ```
 
 ### Web Development
