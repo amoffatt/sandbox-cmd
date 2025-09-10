@@ -27,6 +27,21 @@ After installation, the `box` command will be available in your PATH.
 - Python 3.6 or higher
 - Docker or Podman installed and running
 
+### Installing Container Runtime
+
+#### macOS
+- **Recommended**: [OrbStack](https://orbstack.dev/) - A fast, lightweight Docker Desktop alternative that uses minimal resources
+- **Alternative**: [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/)
+- **Podman**: `brew install podman`
+
+#### Linux
+- **Docker**: Follow the [official Docker installation guide](https://docs.docker.com/engine/install/)
+- **Podman**: `sudo apt install podman` (Ubuntu/Debian) or `sudo dnf install podman` (Fedora)
+
+#### Windows
+- **Docker Desktop**: [Download Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/)
+- **Podman**: [Podman Desktop for Windows](https://podman-desktop.io/)
+
 ## Usage
 
 ```bash
