@@ -26,6 +26,13 @@ setup(
     python_requires=">=3.6",
     install_requires=[
     ],
+    extras_require={
+        'test': [
+            'pytest>=7.0.0',
+            'pytest-cov>=3.0.0',
+            'pytest-mock>=3.6.0',
+        ],
+    },
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",

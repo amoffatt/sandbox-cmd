@@ -5,8 +5,64 @@ import argparse
 import subprocess
 import sys
 import shutil
+import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
+
+
+class ConfigManager:
+    """Manage box CLI configuration for named images"""
+    
+    def __init__(self):
+        self.config_dir = Path.home() / '.box-cli'
+        self.config_file = self.config_dir / 'config.json'
+        self.config = self._load_config()
+    
+    def _load_config(self) -> Dict[str, Any]:
+        """Load configuration from file or create default"""
+        if not self.config_dir.exists():
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+        
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return {'images': {}}
+        return {'images': {}}
+    
+    def _save_config(self) -> None:
+        """Save configuration to file"""
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except IOError as e:
+            print(f"Warning: Could not save config: {e}", file=sys.stderr)
+    
+    def save_image_config(self, name: str, args: argparse.Namespace) -> None:
+        """Save configuration for a named image"""
+        config_entry = {
+            'command': args.command,
+            'node': args.node,
+            'py': args.py,
+            'image_version': args.image_version,
+            'tmux': args.tmux,
+            'port': args.port if args.port else [],
+            'read_only': args.read_only if args.read_only else [],
+            'read_write': args.read_write if args.read_write else []
+        }
+        
+        self.config['images'][name] = config_entry
+        self._save_config()
+        print(f"✓ Saved configuration for image '{name}'")
+    
+    def get_image_config(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get configuration for a named image"""
+        return self.config.get('images', {}).get(name)
+    
+    def list_named_images(self) -> List[str]:
+        """List all configured named images"""
+        return list(self.config.get('images', {}).keys())
 
 
 class ContainerRuntime:
@@ -35,8 +91,9 @@ class ContainerRuntime:
 class ImageBuilder:
     """Handle dynamic image building with tmux pre-installed"""
     
-    def __init__(self, runtime: 'ContainerRuntime'):
+    def __init__(self, runtime: 'ContainerRuntime', config_manager: Optional['ConfigManager'] = None):
         self.runtime = runtime
+        self.config_manager = config_manager
     
     def detect_container_type_from_command(self, command: List[str]) -> str:
         """Auto-detect container type based on the command"""
@@ -115,12 +172,17 @@ class ImageBuilder:
         else:
             return 'alpine:latest'
     
-    def get_box_image_name(self, base_image: str, include_tmux: bool = False) -> str:
-        """Generate box image name from base image"""
-        # Replace : and / with - for valid image names
-        safe_name = base_image.replace(':', '-').replace('/', '-')
-        suffix = '-tmux' if include_tmux else ''
-        return f'box-{safe_name}{suffix}'
+    def get_box_image_name(self, base_image: str, include_tmux: bool = False, custom_name: Optional[str] = None) -> str:
+        """Generate box image name from base image or use custom name"""
+        if custom_name:
+            # Use custom name for the image
+            suffix = '-tmux' if include_tmux else ''
+            return f'box-named-{custom_name}{suffix}'
+        else:
+            # Replace : and / with - for valid image names
+            safe_name = base_image.replace(':', '-').replace('/', '-')
+            suffix = '-tmux' if include_tmux else ''
+            return f'box-{safe_name}{suffix}'
     
     def image_exists(self, image_name: str) -> bool:
         """Check if image already exists locally"""
@@ -183,7 +245,8 @@ WORKDIR /root
         """Get existing box image or build it if needed"""
         base_image = self.get_base_image(args)
         use_tmux = args.tmux
-        box_image_name = self.get_box_image_name(base_image, use_tmux)
+        custom_name = args.name if hasattr(args, 'name') else None
+        box_image_name = self.get_box_image_name(base_image, use_tmux, custom_name)
         
         # Show auto-detection info if no explicit flags were used
         if not args.node and not args.py and args.command:
@@ -253,6 +316,42 @@ WORKDIR /root
             print(f"Successfully removed {removed_count}/{len(images)} images")
         except Exception as e:
             print(f"Error during cleanup: {e}")
+    
+    def get_or_build_named_image(self, name: str, config: Dict[str, Any]) -> Optional[str]:
+        """Build or retrieve a named image from configuration"""
+        # Reconstruct args from config
+        class Args:
+            def __init__(self, config):
+                self.node = config.get('node', False)
+                self.py = config.get('py', False)
+                self.image_version = config.get('image_version')
+                self.tmux = config.get('tmux', False)
+                self.command = config.get('command', [])
+                self.name = name
+        
+        args = Args(config)
+        base_image = self.get_base_image(args)
+        box_image_name = self.get_box_image_name(base_image, args.tmux, name)
+        
+        # Check if image exists, if not build it
+        if not self.image_exists(box_image_name):
+            print(f"Named image '{name}' not found, rebuilding from saved configuration...")
+            
+            # Pull base image first
+            print(f"Pulling base image: {base_image}")
+            pull_result = subprocess.run(
+                [self.runtime.runtime, 'pull', base_image],
+                capture_output=True
+            )
+            
+            if pull_result.returncode != 0:
+                print(f"Warning: Could not pull {base_image}, trying to build anyway...")
+            
+            # Build the image
+            if not self.build_image(base_image, box_image_name, args.tmux):
+                return None
+        
+        return box_image_name
 
 
 class VolumeMapper:
@@ -353,7 +452,7 @@ def parse_args():
             flags.append(arg)
             
             # Check if this flag expects a value
-            if arg in ['-V', '--image-version', '-p', '--port', '-ro', '--read-only', '-rw', '--read-write']:
+            if arg in ['-V', '--image-version', '-p', '--port', '-ro', '--read-only', '-rw', '--read-write', '-n', '--name', '-i', '--image']:
                 # Add the next argument as the flag value
                 if i + 1 < len(args) and not args[i + 1].startswith('-'):
                     i += 1
@@ -375,6 +474,8 @@ Examples:
   box -V 3.9 python script.py              # Run Python script in Python 3.9 container
   box -t -p 3000 npm start                 # Run with tmux and port 3000 mapped
   box -ro ~/data -rw ~/code bash           # Mount data as read-only, code as read-write
+  box -n mydev --node -p 3000 npm start    # Create named image 'mydev' with Node.js and port 3000
+  box -i mydev -rw .                              # Run previously saved 'mydev' configuration
         """
     )
     
@@ -389,6 +490,11 @@ Examples:
         '--py',
         action='store_true',
         help='Use Python image (default: latest)'
+    )
+    image_group.add_argument(
+        '-i', '--image',
+        metavar='NAME',
+        help='Use a previously saved named image'
     )
     
     # Image version
@@ -425,6 +531,13 @@ Examples:
         '-t', '--tmux',
         action='store_true',
         help='Run command inside tmux session for terminal multiplexing'
+    )
+    
+    # Named image creation
+    parser.add_argument(
+        '-n', '--name',
+        metavar='NAME',
+        help='Save this configuration as a named image for future use'
     )
     
     # Cleanup command
@@ -484,16 +597,46 @@ def main():
     # Initialize container runtime
     runtime = ContainerRuntime()
     
-    # Initialize image builder
-    image_builder = ImageBuilder(runtime)
+    # Initialize config manager
+    config_manager = ConfigManager()
+    
+    # Initialize image builder with config manager
+    image_builder = ImageBuilder(runtime, config_manager)
     
     # Handle cleanup command
     if args.clean:
         image_builder.clean_box_images()
         sys.exit(0)
     
-    # Get/build the image
-    image = image_builder.get_or_build_image(args)
+    # Handle named image usage
+    if hasattr(args, 'image') and args.image:
+        # Load configuration for named image
+        config = config_manager.get_image_config(args.image)
+        if not config:
+            print(f"Error: No configuration found for image '{args.image}'", file=sys.stderr)
+            print(f"Available named images: {', '.join(config_manager.list_named_images()) or 'none'}", file=sys.stderr)
+            sys.exit(1)
+        
+        # Build/get the named image
+        image = image_builder.get_or_build_named_image(args.image, config)
+        if not image:
+            print(f"Error: Failed to build named image '{args.image}'", file=sys.stderr)
+            sys.exit(1)
+        
+        # Apply configuration to args
+        args.tmux = config.get('tmux', False)
+        args.port = config.get('port', [])
+        args.read_only = config.get('read_only', [])
+        args.read_write = config.get('read_write', [])
+        args.command = config.get('command', [])
+    else:
+        # Get/build the image normally
+        image = image_builder.get_or_build_image(args)
+        
+        # Save configuration if name is provided
+        if hasattr(args, 'name') and args.name:
+            config_manager.save_image_config(args.name, args)
+            print(f"Named image '{args.name}' can now be used with: box -i {args.name}")
     
     # Build container run command
     run_args = ['run', '--rm', '-it']

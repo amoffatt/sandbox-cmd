@@ -63,6 +63,8 @@ Box auto-detects the container environment:
 - `-p PORT` - Map ports (e.g., `-p 3000` or `-p 8080:3000`)
 - `-ro PATH` - Mount directory as read-only
 - `-rw PATH` - Mount directory as read-write
+- `-n, --name NAME` - Save this configuration as a named image
+- `-i, --image NAME` - Use a previously saved named image
 
 **Note**: The first mounted directory becomes the working directory inside the container.
 
@@ -110,6 +112,26 @@ box --py                           # Python shell
 box -rw ~/projects -ro ~/data bash # With mounts
 ```
 
+### Named Images
+
+Save frequently used configurations for quick access:
+
+```bash
+# Create a named image with your development setup
+box -n myapp --node -p 3000 -p 8080 -rw . npm run dev
+
+# Later, run the same configuration instantly
+box -i myapp
+
+# Create a Python data science environment
+box -n datasci --py -V 3.9 -rw ~/notebooks jupyter lab
+
+# Use it anytime
+box -i datasci
+```
+
+Named configurations are stored in `~/.box-cli/config.json` and automatically rebuild if the Docker image is missing.
+
 
 ## How It Works
 
@@ -118,6 +140,7 @@ box -rw ~/projects -ro ~/data bash # With mounts
 3. Builds optimized image with bash/tmux if needed
 4. Runs container with specified mounts and ports
 5. Executes command or starts interactive shell
+6. Optionally saves configuration for named images in `~/.box-cli/config.json`
 
 
 ## Tmux Usage (`-t` flag)
