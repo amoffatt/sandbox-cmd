@@ -94,7 +94,10 @@ class TestConfigManager(unittest.TestCase):
         args.read_only = ['/data']
         args.read_write = ['/code']
         
-        config_manager.save_image_config('my-app', args)
+        result = config_manager.save_image_config('my-app', args)
+        
+        # Verify save was successful
+        self.assertTrue(result)
         
         # Verify config was saved
         self.assertIn('my-app', config_manager.config['images'])
@@ -207,8 +210,8 @@ class TestConfigManager(unittest.TestCase):
         # Config should still be updated in memory
         self.assertIn('test', config_manager.config['images'])
     
-    def test_overwrite_existing_config(self):
-        """Test that saving with same name overwrites existing config"""
+    def test_overwrite_existing_config_with_force(self):
+        """Test that saving with same name and force=True overwrites existing config"""
         config_manager = ConfigManager()
         
         # Create initial config
@@ -222,9 +225,10 @@ class TestConfigManager(unittest.TestCase):
         args1.read_only = None
         args1.read_write = None
         
-        config_manager.save_image_config('my-app', args1)
+        result1 = config_manager.save_image_config('my-app', args1)
+        self.assertTrue(result1)
         
-        # Overwrite with new config
+        # Overwrite with new config using force=True
         args2 = MagicMock()
         args2.command = ['new', 'command']
         args2.node = False
@@ -235,7 +239,8 @@ class TestConfigManager(unittest.TestCase):
         args2.read_only = None
         args2.read_write = ['/app']
         
-        config_manager.save_image_config('my-app', args2)
+        result2 = config_manager.save_image_config('my-app', args2, force=True)
+        self.assertTrue(result2)
         
         # Verify new config replaced old one
         saved = config_manager.config['images']['my-app']
@@ -246,6 +251,53 @@ class TestConfigManager(unittest.TestCase):
         self.assertTrue(saved['tmux'])
         self.assertEqual(saved['port'], ['8000'])
         self.assertEqual(saved['read_write'], ['/app'])
+    
+    def test_overwrite_confirmation_prompt(self):
+        """Test confirmation prompt when overwriting existing config"""
+        config_manager = ConfigManager()
+        
+        # Create initial config
+        args1 = MagicMock()
+        args1.command = ['npm', 'start']
+        args1.node = True
+        args1.py = False
+        args1.image_version = None
+        args1.tmux = False
+        args1.port = ['3000']
+        args1.read_only = None
+        args1.read_write = None
+        
+        config_manager.save_image_config('test-app', args1)
+        
+        # Try to overwrite without force - simulate user saying 'no'
+        args2 = MagicMock()
+        args2.command = ['npm', 'run', 'dev']
+        args2.node = True
+        args2.py = False
+        args2.image_version = '18'
+        args2.tmux = True
+        args2.port = ['3000', '8080']
+        args2.read_only = None
+        args2.read_write = ['.']
+        
+        with patch('builtins.input', return_value='n'):
+            result = config_manager.save_image_config('test-app', args2)
+            self.assertFalse(result)
+        
+        # Verify original config was not changed
+        saved = config_manager.config['images']['test-app']
+        self.assertEqual(saved['command'], ['npm', 'start'])
+        self.assertIsNone(saved['image_version'])
+        
+        # Try again, simulate user saying 'yes'
+        with patch('builtins.input', return_value='y'):
+            result = config_manager.save_image_config('test-app', args2)
+            self.assertTrue(result)
+        
+        # Verify config was updated
+        saved = config_manager.config['images']['test-app']
+        self.assertEqual(saved['command'], ['npm', 'run', 'dev'])
+        self.assertEqual(saved['image_version'], '18')
 
 
 if __name__ == '__main__':

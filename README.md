@@ -65,6 +65,7 @@ Box auto-detects the container environment:
 - `-rw PATH` - Mount directory as read-write
 - `-n, --name NAME` - Save this configuration as a named image
 - `-i, --image NAME` - Use a previously saved named image
+- `--force` - Overwrite existing named image without confirmation
 
 **Note**: The first mounted directory becomes the working directory inside the container.
 
@@ -131,6 +132,16 @@ box -i datasci
 ```
 
 Named configurations are stored in `~/.box-cli/config.json` and automatically rebuild if the Docker image is missing.
+
+When creating a named image with an existing name, Box will prompt for confirmation unless you use the `--force` flag:
+
+```bash
+# Prompts for confirmation if 'myapp' already exists
+box -n myapp --node npm start
+
+# Overwrites without asking
+box -n myapp --force --node npm start
+```
 
 
 ## How It Works

@@ -304,7 +304,8 @@ class TestIntegrationScenarios(unittest.TestCase):
             args.read_only = None
             args.read_write = None
             
-            config_manager.save_image_config(name, args)
+            result = config_manager.save_image_config(name, args)
+            self.assertTrue(result)
         
         # Verify all images are saved
         named_images = config_manager.list_named_images()

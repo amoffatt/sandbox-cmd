@@ -39,8 +39,32 @@ class ConfigManager:
         except IOError as e:
             print(f"Warning: Could not save config: {e}", file=sys.stderr)
     
-    def save_image_config(self, name: str, args: argparse.Namespace) -> None:
-        """Save configuration for a named image"""
+    def save_image_config(self, name: str, args: argparse.Namespace, force: bool = False) -> bool:
+        """Save configuration for a named image
+        
+        Returns True if config was saved, False if user cancelled
+        """
+        # Check if image already exists and prompt for confirmation
+        if not force and name in self.config.get('images', {}):
+            existing = self.config['images'][name]
+            print(f"\nWarning: Named image '{name}' already exists with configuration:")
+            print(f"  Command: {' '.join(existing.get('command', [])) or '(interactive shell)'}")
+            if existing.get('node'):
+                print(f"  Environment: Node.js {existing.get('image_version') or 'lts'}")
+            elif existing.get('py'):
+                print(f"  Environment: Python {existing.get('image_version') or 'latest'}")
+            else:
+                print(f"  Environment: Alpine")
+            if existing.get('port'):
+                print(f"  Ports: {', '.join(existing['port'])}")
+            if existing.get('tmux'):
+                print(f"  Tmux: enabled")
+            
+            response = input("\nDo you want to overwrite it? [y/N]: ").strip().lower()
+            if response not in ['y', 'yes']:
+                print("Operation cancelled.")
+                return False
+        
         config_entry = {
             'command': args.command,
             'node': args.node,
@@ -55,6 +79,7 @@ class ConfigManager:
         self.config['images'][name] = config_entry
         self._save_config()
         print(f"✓ Saved configuration for image '{name}'")
+        return True
     
     def get_image_config(self, name: str) -> Optional[Dict[str, Any]]:
         """Get configuration for a named image"""
@@ -539,6 +564,11 @@ Examples:
         metavar='NAME',
         help='Save this configuration as a named image for future use'
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Overwrite existing named image without confirmation'
+    )
     
     # Cleanup command
     parser.add_argument(
@@ -608,6 +638,14 @@ def main():
         image_builder.clean_box_images()
         sys.exit(0)
     
+    # Check if we're creating a named image and handle confirmation early
+    if hasattr(args, 'name') and args.name:
+        force = hasattr(args, 'force') and args.force
+        if not config_manager.save_image_config(args.name, args, force=force):
+            # User cancelled the operation
+            sys.exit(0)
+        print(f"Named image '{args.name}' can now be used with: box -i {args.name}")
+    
     # Handle named image usage
     if hasattr(args, 'image') and args.image:
         # Load configuration for named image
@@ -632,11 +670,6 @@ def main():
     else:
         # Get/build the image normally
         image = image_builder.get_or_build_image(args)
-        
-        # Save configuration if name is provided
-        if hasattr(args, 'name') and args.name:
-            config_manager.save_image_config(args.name, args)
-            print(f"Named image '{args.name}' can now be used with: box -i {args.name}")
     
     # Build container run command
     run_args = ['run', '--rm', '-it']
