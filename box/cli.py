@@ -6,8 +6,13 @@ import subprocess
 import sys
 import shutil
 import json
+import re
+import socket
+import time
+import atexit
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
+from .ssh_mount import SSHFSManager
 
 
 class ConfigManager:
@@ -88,29 +93,129 @@ class ConfigManager:
     def list_named_images(self) -> List[str]:
         """List all configured named images"""
         return list(self.config.get('images', {}).keys())
+    
+    def display_named_images(self) -> None:
+        """Display all named images with their configurations"""
+        images = self.config.get('images', {})
+        
+        if not images:
+            print("No named images configured.")
+            print("\nCreate a named image with: box -n <name> [options] [command]")
+            return
+        
+        print("Available named images:")
+        print()
+        
+        for name, config in images.items():
+            print(f"  {name}")
+            
+            # Show environment
+            if config.get('node'):
+                version = config.get('image_version') or 'lts'
+                print(f"    Environment: Node.js {version}")
+            elif config.get('py'):
+                version = config.get('image_version') or 'latest'
+                print(f"    Environment: Python {version}")
+            else:
+                print(f"    Environment: Alpine")
+            
+            # Show ports
+            ports = config.get('port', [])
+            if ports:
+                print(f"    Ports: {', '.join(ports)}")
+            
+            # Show mounts
+            ro_mounts = config.get('read_only', [])
+            rw_mounts = config.get('read_write', [])
+            if ro_mounts:
+                print(f"    Read-only mounts: {', '.join(ro_mounts)}")
+            if rw_mounts:
+                print(f"    Read-write mounts: {', '.join(rw_mounts)}")
+            
+            # Show command
+            command = config.get('command', [])
+            if command:
+                print(f"    Command: {' '.join(command)}")
+            else:
+                print(f"    Command: (interactive shell)")
+            
+            # Show tmux
+            if config.get('tmux'):
+                print(f"    Tmux: enabled")
+            
+            print()
+        
+        print(f"Use with: box -i <name> [additional options]")
 
 
 class ContainerRuntime:
     """Detect and manage container runtime (Docker or Podman)"""
-    
+
     def __init__(self):
         self.runtime = self._detect_runtime()
         if not self.runtime:
             print("Error: Neither Docker nor Podman is installed.", file=sys.stderr)
             print("Please install Docker or Podman to use this tool.", file=sys.stderr)
             sys.exit(1)
-    
+
+        # Check if the runtime daemon is actually running
+        if not self._check_daemon_running():
+            self.print_daemon_not_running_error()
+            sys.exit(1)
+
     def _detect_runtime(self) -> Optional[str]:
         """Detect available container runtime"""
         for runtime in ['docker', 'podman']:
             if shutil.which(runtime):
                 return runtime
         return None
-    
+
+    def _check_daemon_running(self) -> bool:
+        """Check if the container runtime daemon is running"""
+        try:
+            # Try a simple version command to test connectivity
+            result = subprocess.run(
+                [self.runtime, 'version'],
+                capture_output=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, Exception):
+            return False
+
+    def print_daemon_not_running_error(self) -> None:
+        """Print standardized error message when daemon is not running"""
+        if self.runtime == 'docker':
+            print(f"Error: Docker daemon is not running.", file=sys.stderr)
+            print("Please start Docker Desktop or the Docker daemon to continue.", file=sys.stderr)
+        else:  # podman
+            print(f"Error: Podman is not running.", file=sys.stderr)
+            print("Please run 'podman machine start' to start the Podman VM.", file=sys.stderr)
+
     def run_command(self, args: List[str]) -> subprocess.CompletedProcess:
         """Execute container runtime command"""
         cmd = [self.runtime] + args
         return subprocess.run(cmd)
+
+
+class Args:
+    """Standardized arguments container for image operations"""
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None, name: Optional[str] = None):
+        if config:
+            self.node = config.get('node', False)
+            self.py = config.get('py', False)
+            self.image_version = config.get('image_version')
+            self.tmux = config.get('tmux', False)
+            self.command = config.get('command', [])
+            self.name = name
+        else:
+            self.node = False
+            self.py = False
+            self.image_version = None
+            self.tmux = False
+            self.command = []
+            self.name = name
 
 
 class ImageBuilder:
@@ -201,49 +306,72 @@ class ImageBuilder:
         """Generate box image name from base image or use custom name"""
         if custom_name:
             # Use custom name for the image
-            suffix = '-tmux' if include_tmux else ''
+            suffix = ''
+            if include_tmux:
+                suffix += '-tmux'
             return f'box-named-{custom_name}{suffix}'
         else:
             # Replace : and / with - for valid image names
             safe_name = base_image.replace(':', '-').replace('/', '-')
-            suffix = '-tmux' if include_tmux else ''
+            suffix = ''
+            if include_tmux:
+                suffix += '-tmux'
             return f'box-{safe_name}{suffix}'
     
     def image_exists(self, image_name: str) -> bool:
         """Check if image already exists locally"""
+        return self._run_container_command(['image', 'inspect', image_name], capture_output=True)
+    
+    def _run_container_command(self, args: List[str], capture_output: bool = False) -> bool:
+        """Run container command and return success status"""
         try:
-            result = subprocess.run(
-                [self.runtime.runtime, 'image', 'inspect', image_name],
-                capture_output=True,
-                text=True
-            )
+            cmd = [self.runtime.runtime] + args
+            result = subprocess.run(cmd, capture_output=capture_output, text=True)
             return result.returncode == 0
         except Exception:
             return False
     
+    def _pull_base_image(self, base_image: str) -> bool:
+        """Pull base image and return success status"""
+        print(f"Pulling base image: {base_image}")
+        success = self._run_container_command(['pull', base_image], capture_output=True)
+        if not success:
+            print(f"Warning: Could not pull {base_image}, trying to build anyway...")
+        return success
+    
     def build_dockerfile_content(self, base_image: str, include_tmux: bool = False) -> str:
         """Generate Dockerfile content for the given base image"""
-        if include_tmux:
-            if 'alpine' in base_image:
-                install_cmd = 'RUN apk add --no-cache tmux bash'
-            else:
-                install_cmd = 'RUN apt-get update && apt-get install -y tmux && rm -rf /var/lib/apt/lists/*'
+        install_cmds = []
+        
+        if 'alpine' in base_image:
+            packages = ['bash']
+            if include_tmux:
+                packages.append('tmux')
+            install_cmds.append(f'RUN apk add --no-cache {" ".join(packages)}')
         else:
-            # Just ensure bash is available for non-alpine images
-            if 'alpine' in base_image:
-                install_cmd = 'RUN apk add --no-cache bash'
+            packages = []
+            if include_tmux:
+                packages.append('tmux')
+            
+            if packages:
+                install_cmds.append(f'RUN apt-get update && apt-get install -y {" ".join(packages)} && rm -rf /var/lib/apt/lists/*')
             else:
-                install_cmd = '# bash already available'
+                install_cmds.append('# bash already available')
         
         return f"""FROM {base_image}
-{install_cmd}
+{chr(10).join(install_cmds)}
 WORKDIR /root
 """
     
     def build_image(self, base_image: str, box_image_name: str, include_tmux: bool = False) -> bool:
         """Build the box image with optional tmux"""
-        tools = "with tmux" if include_tmux else "with bash"
-        print(f"Building box image {tools}: {box_image_name}")
+        tools = []
+        if include_tmux:
+            tools.append('tmux')
+        if not tools:
+            tools.append('bash')
+        
+        print(f"Building box image with {', '.join(tools)}: {box_image_name}")
         
         dockerfile_content = self.build_dockerfile_content(base_image, include_tmux)
         
@@ -260,7 +388,12 @@ WORKDIR /root
                 print(f"✓ Successfully built {box_image_name}")
                 return True
             else:
-                print(f"✗ Failed to build image: {result.stderr}")
+                # Check for common connection errors
+                if "connection refused" in result.stderr.lower() or "cannot connect" in result.stderr.lower():
+                    print("✗ ", end="", file=sys.stderr)
+                    self.runtime.print_daemon_not_running_error()
+                else:
+                    print(f"✗ Failed to build image: {result.stderr}")
                 return False
         except Exception as e:
             print(f"✗ Error building image: {e}")
@@ -284,14 +417,7 @@ WORKDIR /root
             return box_image_name
         
         # Pull base image first to ensure it exists
-        print(f"Pulling base image: {base_image}")
-        pull_result = subprocess.run(
-            [self.runtime.runtime, 'pull', base_image],
-            capture_output=True
-        )
-        
-        if pull_result.returncode != 0:
-            print(f"Warning: Could not pull {base_image}, trying to build anyway...")
+        self._pull_base_image(base_image)
         
         # Build the box image
         if self.build_image(base_image, box_image_name, use_tmux):
@@ -344,17 +470,7 @@ WORKDIR /root
     
     def get_or_build_named_image(self, name: str, config: Dict[str, Any]) -> Optional[str]:
         """Build or retrieve a named image from configuration"""
-        # Reconstruct args from config
-        class Args:
-            def __init__(self, config):
-                self.node = config.get('node', False)
-                self.py = config.get('py', False)
-                self.image_version = config.get('image_version')
-                self.tmux = config.get('tmux', False)
-                self.command = config.get('command', [])
-                self.name = name
-        
-        args = Args(config)
+        args = Args(config, name)
         base_image = self.get_base_image(args)
         box_image_name = self.get_box_image_name(base_image, args.tmux, name)
         
@@ -362,25 +478,168 @@ WORKDIR /root
         if not self.image_exists(box_image_name):
             print(f"Named image '{name}' not found, rebuilding from saved configuration...")
             
-            # Pull base image first
-            print(f"Pulling base image: {base_image}")
-            pull_result = subprocess.run(
-                [self.runtime.runtime, 'pull', base_image],
-                capture_output=True
-            )
-            
-            if pull_result.returncode != 0:
-                print(f"Warning: Could not pull {base_image}, trying to build anyway...")
-            
-            # Build the image
-            if not self.build_image(base_image, box_image_name, args.tmux):
-                return None
+            # If we have a command to run, we need to run it and commit the result
+            if config.get('command'):
+                return self.build_named_image_with_command(name, config, box_image_name)
+            else:
+                # No command, just build the base box image
+                self._pull_base_image(base_image)
+                
+                # Build the image
+                if not self.build_image(base_image, box_image_name, args.tmux):
+                    return None
         
         return box_image_name
+    
+    def build_named_image_with_command(self, name: str, config: Dict[str, Any], target_image_name: str) -> Optional[str]:
+        """Build a named image by running the saved command and committing the result"""
+        # First get/build the base box image
+        base_args = Args(config, None)
+        base_image = self.get_base_image(base_args)
+        box_base_image = self.get_box_image_name(base_image, base_args.tmux)
+        
+        # Build base box image if needed
+        if not self.image_exists(box_base_image):
+            print(f"Building base box image: {box_base_image}")
+            self._pull_base_image(base_image)
+            
+            if not self.build_image(base_image, box_base_image, base_args.tmux):
+                print(f"Failed to build base box image")
+                return None
+        
+        # Now run the saved command in the box image and commit the result
+        command = config.get('command', [])
+        print(f"Running setup command: {' '.join(command)}")
+        
+        try:
+            # Run the command in the container
+            run_cmd = [
+                self.runtime.runtime, 'run', '--name', f'box-build-{name}',
+                box_base_image
+            ] + command
+            
+            result = subprocess.run(run_cmd, capture_output=False)  # Show output to user
+            
+            if result.returncode != 0:
+                print(f"Command failed with exit code {result.returncode}")
+                # Clean up the container
+                subprocess.run([self.runtime.runtime, 'rm', f'box-build-{name}'], capture_output=True)
+                return None
+            
+            # Commit the container to create the named image
+            print(f"Committing container to create image: {target_image_name}")
+            commit_result = subprocess.run([
+                self.runtime.runtime, 'commit',
+                f'box-build-{name}',
+                target_image_name
+            ], capture_output=True)
+            
+            # Clean up the build container
+            subprocess.run([self.runtime.runtime, 'rm', f'box-build-{name}'], capture_output=True)
+            
+            if commit_result.returncode != 0:
+                print(f"Failed to commit container: {commit_result.stderr.decode()}")
+                return None
+            
+            print(f"✓ Successfully created named image: {name}")
+            return target_image_name
+            
+        except Exception as e:
+            print(f"Error building named image: {e}")
+            # Clean up if something went wrong
+            subprocess.run([self.runtime.runtime, 'rm', f'box-build-{name}'], capture_output=True)
+            return None
+
 
 
 class VolumeMapper:
-    """Handle volume mounting logic"""
+    """Handle volume mounting logic including SSH mounts"""
+    
+    def __init__(self, runtime: 'ContainerRuntime'):
+        self.runtime = runtime
+        self.sshfs_mgr = SSHFSManager()
+    
+    def prepare_ssh_mount(self, ssh_spec: str, read_only: bool = False) -> Optional[str]:
+        """Create SSHFS mount on host and return local mount path"""
+        # Extract the actual SSH part (remove container destination if present)
+        if ssh_spec.count(':') > 1:
+            # Has explicit destination: user@host:remote:container
+            ssh_part = ssh_spec.rsplit(':', 1)[0]
+        else:
+            ssh_part = ssh_spec
+        
+        return self.sshfs_mgr.create_ssh_mount(ssh_part, read_only)
+    
+    
+    def get_volume_args(self, args) -> Tuple[List[str], Optional[str]]:
+        """Generate volume mount arguments and return first mounted directory"""
+        volume_args = []
+        first_mount_dest = None
+        
+        # Process read-only mounts
+        if args.read_only:
+            for ro_spec in args.read_only:
+                mount_args, dest = self._process_mount_spec(ro_spec, read_only=True)
+                volume_args.extend(mount_args)
+                if first_mount_dest is None:
+                    first_mount_dest = dest
+        
+        # Process read-write mounts
+        if args.read_write:
+            for rw_spec in args.read_write:
+                mount_args, dest = self._process_mount_spec(rw_spec, read_only=False)
+                volume_args.extend(mount_args)
+                if first_mount_dest is None:
+                    first_mount_dest = dest
+        
+        return volume_args, first_mount_dest
+    
+    def _process_mount_spec(self, spec: str, read_only: bool) -> Tuple[List[str], Optional[str]]:
+        """Process a single mount specification and return volume args and destination"""
+        if self.sshfs_mgr.is_ssh_url(spec):
+            return self._process_ssh_mount(spec, read_only)
+        else:
+            return self._process_local_mount(spec, read_only)
+    
+    def _process_ssh_mount(self, spec: str, read_only: bool) -> Tuple[List[str], Optional[str]]:
+        """Process SSH mount specification"""
+        local_mount_path = self.prepare_ssh_mount(spec, read_only)
+        if not local_mount_path:
+            return [], None
+        
+        # Parse container destination
+        if ':' in spec and spec.count(':') > 1:
+            # Has explicit destination: user@host:remote:container
+            container_dest = spec.rsplit(':', 1)[1]
+        else:
+            # Use remote path basename as destination
+            user, host, remote_path = self.sshfs_mgr.parse_ssh_url(spec)
+            container_dest = f'/root/{Path(remote_path).name}'
+        
+        if not container_dest.startswith('/'):
+            container_dest = f'/root/{container_dest}'
+        
+        # Mount the local SSHFS path into container
+        opts = 'ro' if read_only else 'rw'
+        return ['-v', f'{local_mount_path}:{container_dest}:{opts}'], container_dest
+    
+    def _process_local_mount(self, spec: str, read_only: bool) -> Tuple[List[str], str]:
+        """Process local mount specification"""
+        src, dest, opts = SpecParser.parse_volume_spec(spec, read_only)
+        return ['-v', f'{src}:{dest}:{opts}'], dest
+
+
+class SpecParser:
+    """Common parsing utilities for port and volume specifications"""
+    
+    @staticmethod
+    def parse_port_spec(spec: str) -> Tuple[str, str]:
+        """Parse port specification"""
+        if ':' in spec:
+            parts = spec.split(':', 1)
+            return parts[0], parts[1]
+        else:
+            return spec, spec
     
     @staticmethod
     def parse_volume_spec(spec: str, read_only: bool = False) -> Tuple[str, str, str]:
@@ -401,43 +660,10 @@ class VolumeMapper:
         
         options = 'ro' if read_only else 'rw'
         return str(src_path), dest_path, options
-    
-    @staticmethod
-    def get_volume_args(args) -> Tuple[List[str], Optional[str]]:
-        """Generate volume mount arguments and return first mounted directory"""
-        volume_args = []
-        first_mount_dest = None
-        
-        # Process read-only mounts
-        if args.read_only:
-            for ro_spec in args.read_only:
-                src, dest, opts = VolumeMapper.parse_volume_spec(ro_spec, read_only=True)
-                volume_args.extend(['-v', f'{src}:{dest}:{opts}'])
-                if first_mount_dest is None:
-                    first_mount_dest = dest
-        
-        # Process read-write mounts
-        if args.read_write:
-            for rw_spec in args.read_write:
-                src, dest, opts = VolumeMapper.parse_volume_spec(rw_spec, read_only=False)
-                volume_args.extend(['-v', f'{src}:{dest}:{opts}'])
-                if first_mount_dest is None:
-                    first_mount_dest = dest
-        
-        return volume_args, first_mount_dest
 
 
 class PortMapper:
     """Handle port mapping logic"""
-    
-    @staticmethod
-    def parse_port_spec(spec: str) -> Tuple[str, str]:
-        """Parse port specification"""
-        if ':' in spec:
-            parts = spec.split(':', 1)
-            return parts[0], parts[1]
-        else:
-            return spec, spec
     
     @staticmethod
     def get_port_args(args) -> List[str]:
@@ -446,7 +672,7 @@ class PortMapper:
         
         if args.port:
             for port_spec in args.port:
-                host_port, container_port = PortMapper.parse_port_spec(port_spec)
+                host_port, container_port = SpecParser.parse_port_spec(port_spec)
                 port_args.extend(['-p', f'{host_port}:{container_port}'])
         
         return port_args
@@ -500,7 +726,10 @@ Examples:
   box -t -p 3000 npm start                 # Run with tmux and port 3000 mapped
   box -ro ~/data -rw ~/code bash           # Mount data as read-only, code as read-write
   box -n mydev --node -p 3000 npm start    # Create named image 'mydev' with Node.js and port 3000
-  box -i mydev -rw .                              # Run previously saved 'mydev' configuration
+  box -i mydev -rw .                       # Run previously saved 'mydev' configuration
+  box -l                                   # List all available named images
+  box -rw user@host:~/project bash         # Mount remote directory over SSH
+  box -ro admin@server:/logs:/logs python  # Mount SSH dir to specific container path
         """
     )
     
@@ -542,13 +771,13 @@ Examples:
         '-ro', '--read-only',
         action='append',
         metavar='PATH',
-        help='Mount directory as read-only. Format: PATH or SRC:DEST'
+        help='Mount directory as read-only. Format: PATH, SRC:DEST, or user@host:remote[:dest]'
     )
     parser.add_argument(
         '-rw', '--read-write',
         action='append',
         metavar='PATH',
-        help='Mount directory as read-write. Format: PATH or SRC:DEST'
+        help='Mount directory as read-write. Format: PATH, SRC:DEST, or user@host:remote[:dest]'
     )
     
     # Tmux option
@@ -577,6 +806,13 @@ Examples:
         help='Remove all box-built images to save disk space'
     )
     
+    # List named images
+    parser.add_argument(
+        '-l', '--list',
+        action='store_true',
+        help='List all available named images'
+    )
+    
     # Parse just the flags
     parsed_args = parser.parse_args(flags)
     
@@ -586,34 +822,6 @@ Examples:
     return parsed_args
 
 
-def build_startup_script(first_mount_dir: Optional[str], user_command: List[str], use_tmux: bool = False) -> str:
-    """Build the startup script for the container"""
-    # Build the startup script
-    script_parts = []
-    
-    # Change to mounted directory if specified
-    if first_mount_dir:
-        script_parts.append(f'cd {first_mount_dir} 2>/dev/null || true')
-    
-    if use_tmux:
-        # Start tmux with the command - tmux is installed in tmux-enabled images
-        if user_command:
-            # For commands, run them in tmux
-            inner_command = ' '.join(user_command)
-            script_parts.append(f'tmux new-session -s main -n box "{inner_command}"')
-        else:
-            # For interactive shells, start tmux with bash
-            script_parts.append('tmux new-session -s main -n box')
-    else:
-        # Run directly without tmux
-        if user_command:
-            # Execute the command directly
-            script_parts.append(' '.join(user_command))
-        else:
-            # Start an interactive bash shell
-            script_parts.append('exec /bin/bash')
-    
-    return ' && '.join(script_parts)
 
 
 
@@ -633,18 +841,73 @@ def main():
     # Initialize image builder with config manager
     image_builder = ImageBuilder(runtime, config_manager)
     
+    # Initialize volume mapper
+    volume_mapper = VolumeMapper(runtime)
+    
+    # Check if we need SSH mounts
+    has_ssh_mounts = False
+    if args.read_only:
+        has_ssh_mounts = any(SSHFSManager.is_ssh_url(spec) for spec in args.read_only)
+    if not has_ssh_mounts and args.read_write:
+        has_ssh_mounts = any(SSHFSManager.is_ssh_url(spec) for spec in args.read_write)
+    
     # Handle cleanup command
     if args.clean:
         image_builder.clean_box_images()
         sys.exit(0)
     
+    # Handle list command
+    if args.list:
+        config_manager.display_named_images()
+        sys.exit(0)
+    
     # Check if we're creating a named image and handle confirmation early
     if hasattr(args, 'name') and args.name:
         force = hasattr(args, 'force') and args.force
+        
+        # Auto-detect environment from command if not explicitly specified
+        if not args.node and not args.py and args.command:
+            detected_type = image_builder.detect_container_type_from_command(args.command)
+            if detected_type == 'node':
+                args.node = True
+            elif detected_type == 'python':
+                args.py = True
+        
         if not config_manager.save_image_config(args.name, args, force=force):
             # User cancelled the operation
             sys.exit(0)
-        print(f"Named image '{args.name}' can now be used with: box -i {args.name}")
+        
+        # If we have a command, build the named image immediately by running the command
+        if args.command:
+            print(f"Building named image '{args.name}' by running setup command...")
+            
+            # Create config dict from args
+            config = {
+                'command': args.command,
+                'node': args.node,
+                'py': args.py,
+                'image_version': args.image_version,
+                'tmux': args.tmux,
+                'port': args.port if args.port else [],
+                'read_only': args.read_only if args.read_only else [],
+                'read_write': args.read_write if args.read_write else []
+            }
+            
+            # Generate the target image name
+            base_image = image_builder.get_base_image(args)
+            target_image_name = image_builder.get_box_image_name(base_image, args.tmux, args.name)
+            
+            # Build the named image with the command
+            if image_builder.build_named_image_with_command(args.name, config, target_image_name):
+                print(f"✓ Named image '{args.name}' is ready!")
+                print(f"Use with: box -i {args.name} [new-command]")
+                sys.exit(0)
+            else:
+                print(f"✗ Failed to create named image '{args.name}'")
+                sys.exit(1)
+        else:
+            print(f"Named image '{args.name}' configuration saved.")
+            print(f"Use with: box -i {args.name}")
     
     # Handle named image usage
     if hasattr(args, 'image') and args.image:
@@ -661,49 +924,98 @@ def main():
             print(f"Error: Failed to build named image '{args.image}'", file=sys.stderr)
             sys.exit(1)
         
-        # Apply configuration to args
+        # Apply configuration to args (but allow command override)
         args.tmux = config.get('tmux', False)
         args.port = config.get('port', [])
-        args.read_only = config.get('read_only', [])
-        args.read_write = config.get('read_write', [])
-        args.command = config.get('command', [])
+        
+        # Merge saved mounts with any new ones provided by user
+        saved_ro = config.get('read_only', [])
+        saved_rw = config.get('read_write', [])
+        
+        # Combine saved mounts with new user-provided mounts
+        if args.read_only:
+            args.read_only = saved_ro + args.read_only
+        else:
+            args.read_only = saved_ro
+            
+        if args.read_write:
+            args.read_write = saved_rw + args.read_write
+        else:
+            args.read_write = saved_rw
+        
+        # Only use saved command if no command was provided by user
+        if not args.command:
+            args.command = config.get('command', [])
     else:
-        # Get/build the image normally
+        # Get/build the image normally, including sshfs if needed
         image = image_builder.get_or_build_image(args)
     
     # Build container run command
     run_args = ['run', '--rm', '-it']
     
     # Add volume mounts and get first mounted directory
-    volume_args, first_mount_dir = VolumeMapper.get_volume_args(args)
+    volume_args, first_mount_dir = volume_mapper.get_volume_args(args)
     run_args.extend(volume_args)
     
     # Add port mappings
     run_args.extend(PortMapper.get_port_args(args))
     
-    # Set working directory to /root (or first mount if available)
-    if first_mount_dir:
-        run_args.extend(['-w', first_mount_dir])
-    else:
-        run_args.extend(['-w', '/root'])
-    
     # Add image
     run_args.append(image)
     
-    # Build and add the startup script
-    startup_script = build_startup_script(first_mount_dir, args.command, args.tmux)
-    run_args.extend(['/bin/bash', '-c', startup_script])
+    # Set working directory if we have mounts (but let container handle it to avoid -w issues)
+    # We'll use cd in the command instead of -w flag for better compatibility
+    
+    # Add command execution
+    if args.tmux:
+        if args.command:
+            # For commands, run them in tmux with working directory
+            inner_command = ' '.join(args.command)
+            if first_mount_dir:
+                bash_cmd = f'cd {first_mount_dir} 2>/dev/null || cd /root; tmux new-session -s main -n box "{inner_command}"'
+            else:
+                bash_cmd = f'tmux new-session -s main -n box "{inner_command}"'
+            run_args.extend(['/bin/bash', '-c', bash_cmd])
+        else:
+            # For interactive shells, start tmux with bash
+            if first_mount_dir:
+                bash_cmd = f'cd {first_mount_dir} 2>/dev/null || cd /root; tmux new-session -s main -n box'
+            else:
+                bash_cmd = 'tmux new-session -s main -n box'
+            run_args.extend(['/bin/bash', '-c', bash_cmd])
+    else:
+        # Run directly without tmux
+        if args.command:
+            # Execute the command directly with working directory
+            if first_mount_dir:
+                bash_cmd = f'cd {first_mount_dir} 2>/dev/null || cd /root; ' + ' '.join(args.command)
+                run_args.extend(['/bin/bash', '-c', bash_cmd])
+            else:
+                run_args.extend(args.command)
+        else:
+            # Start an interactive bash shell
+            if first_mount_dir:
+                bash_cmd = f'cd {first_mount_dir} 2>/dev/null || cd /root; exec /bin/bash'
+                run_args.extend(['/bin/bash', '-c', bash_cmd])
+            else:
+                run_args.extend(['/bin/bash'])
     
     # Execute container
     try:
         result = runtime.run_command(run_args)
-        sys.exit(result.returncode)
+        return_code = result.returncode
     except KeyboardInterrupt:
         print("\nInterrupted by user", file=sys.stderr)
-        sys.exit(130)
+        return_code = 130
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        return_code = 1
+    finally:
+        # Clean up SSH mounts
+        if 'volume_mapper' in locals() and hasattr(volume_mapper, 'sshfs_mgr'):
+            volume_mapper.sshfs_mgr.cleanup_mounts()
+    
+    sys.exit(return_code)
 
 
 if __name__ == '__main__':

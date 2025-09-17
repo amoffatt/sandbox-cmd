@@ -20,12 +20,14 @@ For development (editable installation):
 pip install -e .
 ```
 
-After installation, the `box` command will be available in your PATH.
+After installation, the `box` and `box_sshfs` commands will be available in your PATH.
 
 ## Prerequisites
 
 - Python 3.6 or higher
 - Docker or Podman installed and running
+- SSH client (for SSH mounting feature)
+- fuse-t and fuse-t-sshfs (for SSH mounting on macOS): `brew tap macos-fuse-t/homebrew-cask && brew install fuse-t fuse-t-sshfs`
 
 ### Installing Container Runtime
 
@@ -61,8 +63,8 @@ Box auto-detects the container environment:
 - `-t, --tmux` - Run inside tmux session
 - `--clean` - Remove all box-built images
 - `-p PORT` - Map ports (e.g., `-p 3000` or `-p 8080:3000`)
-- `-ro PATH` - Mount directory as read-only
-- `-rw PATH` - Mount directory as read-write
+- `-ro PATH` - Mount directory as read-only (supports SSH: `user@host:path`)
+- `-rw PATH` - Mount directory as read-write (supports SSH: `user@host:path`)
 - `-n, --name NAME` - Save this configuration as a named image
 - `-i, --image NAME` - Use a previously saved named image
 - `--force` - Overwrite existing named image without confirmation
@@ -94,6 +96,59 @@ box -rw . -t python                # Interactive Python in current dir
 ```bash
 box -ro ~/data/input -rw ~/data/output python process.py  # Working dir: ~/data/input
 box -ro ~/datasets:/data -rw ~/results:/output python analyze.py  # Working dir: /data
+```
+
+### SSH Volume Mounting
+
+Mount remote directories over SSH without installing anything on the host (besides SSH):
+
+```bash
+# Mount remote directory with automatic path
+box -rw user@server:~/project python script.py
+
+# Mount to specific container path  
+box -ro admin@host:/var/logs:/logs bash
+
+# Multiple SSH mounts
+box -ro user@data-server:/datasets -rw user@work:~/results python analyze.py
+
+# Mix local and SSH mounts
+box -ro ~/local/data -rw admin@remote:~/output:/results bash
+```
+
+**How it works:**
+1. Box uses SSHFS to mount remote directories directly on your host system
+2. The mounted directories are then bind-mounted into the container
+3. Your SSH keys/agent handles authentication - no credentials in the container
+4. Requires fuse-t and fuse-t-sshfs on macOS (no kernel extensions needed)
+
+**SSH Authentication:**
+- Uses your existing SSH keys and SSH agent
+- No passwords or keys are passed into the container
+- Set up passwordless SSH with `ssh-copy-id` for convenience
+
+## Standalone SSH Mounting
+
+The `box_sshfs` command allows you to mount SSH directories directly without using containers:
+
+```bash
+# Mount remote directory to local path
+box_sshfs user@host:~/project ~/local/project
+
+# Mount with automatic local directory name
+box_sshfs user@host:~/data
+
+# Mount as read-only
+box_sshfs --read-only user@host:/var/logs logs
+
+# List active mounts
+box_sshfs --list
+
+# Unmount specific path
+box_sshfs --unmount ~/local/project
+
+# Clean up all SSH mounts
+box_sshfs --cleanup
 ```
 
 ### Web Development

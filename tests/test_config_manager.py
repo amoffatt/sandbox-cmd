@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from box.cli import ConfigManager
 
 
-class TestConfigManager(unittest.TestCase):
-    """Test cases for ConfigManager class"""
+class BaseTestCase(unittest.TestCase):
+    """Base test case with common setup and utilities"""
     
     def setUp(self):
         """Set up test fixtures"""
@@ -37,6 +37,30 @@ class TestConfigManager(unittest.TestCase):
         # Clean up temporary directory
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
+    
+    def create_mock_args(self, **kwargs):
+        """Create a mock args object with common defaults"""
+        defaults = {
+            'command': [],
+            'node': False,
+            'py': False,
+            'image_version': None,
+            'tmux': False,
+            'port': None,
+            'read_only': None,
+            'read_write': None
+        }
+        defaults.update(kwargs)
+        
+        args = MagicMock()
+        for key, value in defaults.items():
+            setattr(args, key, value)
+        
+        return args
+
+
+class TestConfigManager(BaseTestCase):
+    """Test cases for ConfigManager class"""
     
     def test_init_creates_config_dir(self):
         """Test that ConfigManager creates config directory if it doesn't exist"""
@@ -84,15 +108,15 @@ class TestConfigManager(unittest.TestCase):
         config_manager = ConfigManager()
         
         # Create mock args object
-        args = MagicMock()
-        args.command = ['npm', 'start']
-        args.node = True
-        args.py = False
-        args.image_version = '18'
-        args.tmux = True
-        args.port = ['3000', '8080:8080']
-        args.read_only = ['/data']
-        args.read_write = ['/code']
+        args = self.create_mock_args(
+            command=['npm', 'start'],
+            node=True,
+            image_version='18',
+            tmux=True,
+            port=['3000', '8080:8080'],
+            read_only=['/data'],
+            read_write=['/code']
+        )
         
         result = config_manager.save_image_config('my-app', args)
         
@@ -122,15 +146,10 @@ class TestConfigManager(unittest.TestCase):
         config_manager = ConfigManager()
         
         # Create mock args object with None values
-        args = MagicMock()
-        args.command = []
-        args.node = False
-        args.py = True
-        args.image_version = None
-        args.tmux = False
-        args.port = None
-        args.read_only = None
-        args.read_write = None
+        args = self.create_mock_args(
+            command=[],
+            py=True
+        )
         
         config_manager.save_image_config('python-shell', args)
         
@@ -193,15 +212,7 @@ class TestConfigManager(unittest.TestCase):
         os.chmod(self.config_file, 0o444)  # Read-only
         
         # Create mock args
-        args = MagicMock()
-        args.command = ['test']
-        args.node = False
-        args.py = False
-        args.image_version = None
-        args.tmux = False
-        args.port = None
-        args.read_only = None
-        args.read_write = None
+        args = self.create_mock_args(command=['test'])
         
         # This should not raise an exception, just print a warning
         with patch('sys.stderr'):
@@ -215,29 +226,24 @@ class TestConfigManager(unittest.TestCase):
         config_manager = ConfigManager()
         
         # Create initial config
-        args1 = MagicMock()
-        args1.command = ['old', 'command']
-        args1.node = True
-        args1.py = False
-        args1.image_version = '14'
-        args1.tmux = False
-        args1.port = None
-        args1.read_only = None
-        args1.read_write = None
+        args1 = self.create_mock_args(
+            command=['old', 'command'],
+            node=True,
+            image_version='14'
+        )
         
         result1 = config_manager.save_image_config('my-app', args1)
         self.assertTrue(result1)
         
         # Overwrite with new config using force=True
-        args2 = MagicMock()
-        args2.command = ['new', 'command']
-        args2.node = False
-        args2.py = True
-        args2.image_version = '3.9'
-        args2.tmux = True
-        args2.port = ['8000']
-        args2.read_only = None
-        args2.read_write = ['/app']
+        args2 = self.create_mock_args(
+            command=['new', 'command'],
+            py=True,
+            image_version='3.9',
+            tmux=True,
+            port=['8000'],
+            read_write=['/app']
+        )
         
         result2 = config_manager.save_image_config('my-app', args2, force=True)
         self.assertTrue(result2)
@@ -257,28 +263,23 @@ class TestConfigManager(unittest.TestCase):
         config_manager = ConfigManager()
         
         # Create initial config
-        args1 = MagicMock()
-        args1.command = ['npm', 'start']
-        args1.node = True
-        args1.py = False
-        args1.image_version = None
-        args1.tmux = False
-        args1.port = ['3000']
-        args1.read_only = None
-        args1.read_write = None
+        args1 = self.create_mock_args(
+            command=['npm', 'start'],
+            node=True,
+            port=['3000']
+        )
         
         config_manager.save_image_config('test-app', args1)
         
         # Try to overwrite without force - simulate user saying 'no'
-        args2 = MagicMock()
-        args2.command = ['npm', 'run', 'dev']
-        args2.node = True
-        args2.py = False
-        args2.image_version = '18'
-        args2.tmux = True
-        args2.port = ['3000', '8080']
-        args2.read_only = None
-        args2.read_write = ['.']
+        args2 = self.create_mock_args(
+            command=['npm', 'run', 'dev'],
+            node=True,
+            image_version='18',
+            tmux=True,
+            port=['3000', '8080'],
+            read_write=['.']
+        )
         
         with patch('builtins.input', return_value='n'):
             result = config_manager.save_image_config('test-app', args2)

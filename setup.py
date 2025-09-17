@@ -21,6 +21,7 @@ setup(
     entry_points={
         "console_scripts": [
             "box=box.cli:main",
+            "box_sshfs=box.sshfs_cli:main",
         ],
     },
     python_requires=">=3.6",
