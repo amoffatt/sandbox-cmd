@@ -78,7 +78,10 @@ class ConfigManager:
             'tmux': args.tmux,
             'port': args.port if args.port else [],
             'read_only': args.read_only if args.read_only else [],
-            'read_write': args.read_write if args.read_write else []
+            'read_write': args.read_write if args.read_write else [],
+            'no_network': getattr(args, 'no_network', False),
+            'internal_network': getattr(args, 'internal_network', False),
+            'http_proxy': getattr(args, 'http_proxy', None)
         }
         
         self.config['images'][name] = config_entry
@@ -142,7 +145,15 @@ class ConfigManager:
             # Show tmux
             if config.get('tmux'):
                 print(f"    Tmux: enabled")
-            
+
+            # Show network restrictions
+            if config.get('no_network'):
+                print(f"    Network: disabled")
+            elif config.get('internal_network'):
+                print(f"    Network: internal only")
+            elif config.get('http_proxy'):
+                print(f"    HTTP Proxy: {config.get('http_proxy')}")
+
             print()
         
         print(f"Use with: box -i <name> [additional options]")
@@ -209,6 +220,9 @@ class Args:
             self.tmux = config.get('tmux', False)
             self.command = config.get('command', [])
             self.name = name
+            self.no_network = config.get('no_network', False)
+            self.internal_network = config.get('internal_network', False)
+            self.http_proxy = config.get('http_proxy')
         else:
             self.node = False
             self.py = False
@@ -216,6 +230,9 @@ class Args:
             self.tmux = False
             self.command = []
             self.name = name
+            self.no_network = False
+            self.internal_network = False
+            self.http_proxy = None
 
 
 class ImageBuilder:
@@ -678,6 +695,64 @@ class PortMapper:
         return port_args
 
 
+class NetworkManager:
+    """Handle container network configuration and restrictions"""
+
+    def __init__(self, runtime: 'ContainerRuntime'):
+        self.runtime = runtime
+        self._internal_network_name = 'box-internal'
+
+    def get_network_args(self, args) -> Tuple[List[str], Optional[Dict[str, str]]]:
+        """Generate network arguments and environment variables for container runtime"""
+        network_args = []
+        env_vars = {}
+
+        if hasattr(args, 'no_network') and args.no_network:
+            # Complete network isolation
+            network_args.extend(['--network', 'none'])
+
+        elif hasattr(args, 'internal_network') and args.internal_network:
+            # Internal network only (no internet access)
+            self._ensure_internal_network()
+            network_args.extend(['--network', self._internal_network_name])
+
+        # Add proxy environment variables if specified
+        if hasattr(args, 'http_proxy') and args.http_proxy:
+            env_vars['HTTP_PROXY'] = args.http_proxy
+            env_vars['HTTPS_PROXY'] = args.http_proxy
+            env_vars['http_proxy'] = args.http_proxy
+            env_vars['https_proxy'] = args.http_proxy
+
+        return network_args, env_vars
+
+    def _ensure_internal_network(self) -> None:
+        """Create internal network if it doesn't exist"""
+        # Check if network exists
+        check_result = subprocess.run(
+            [self.runtime.runtime, 'network', 'inspect', self._internal_network_name],
+            capture_output=True
+        )
+
+        if check_result.returncode != 0:
+            # Network doesn't exist, create it
+            print(f"Creating internal network: {self._internal_network_name}")
+            create_result = subprocess.run([
+                self.runtime.runtime, 'network', 'create',
+                '--internal',
+                self._internal_network_name
+            ], capture_output=True)
+
+            if create_result.returncode != 0:
+                print(f"Warning: Failed to create internal network: {create_result.stderr.decode()}")
+
+    def format_env_args(self, env_vars: Dict[str, str]) -> List[str]:
+        """Convert environment variables dict to container runtime args"""
+        env_args = []
+        for key, value in env_vars.items():
+            env_args.extend(['-e', f'{key}={value}'])
+        return env_args
+
+
 def parse_args():
     """Parse command line arguments with smart command detection"""
     # First, separate flags from command
@@ -703,7 +778,7 @@ def parse_args():
             flags.append(arg)
             
             # Check if this flag expects a value
-            if arg in ['-V', '--image-version', '-p', '--port', '-ro', '--read-only', '-rw', '--read-write', '-n', '--name', '-i', '--image']:
+            if arg in ['-V', '--image-version', '-p', '--port', '-ro', '--read-only', '-rw', '--read-write', '-n', '--name', '-i', '--image', '--http-proxy']:
                 # Add the next argument as the flag value
                 if i + 1 < len(args) and not args[i + 1].startswith('-'):
                     i += 1
@@ -730,6 +805,9 @@ Examples:
   box -l                                   # List all available named images
   box -rw user@host:~/project bash         # Mount remote directory over SSH
   box -ro admin@server:/logs:/logs python  # Mount SSH dir to specific container path
+  box -N python analyze.py                 # Run with no network access
+  box --internal-network bash              # Run with internal network only (no internet)
+  box --http-proxy http://proxy:3128 curl example.com  # Use HTTP proxy for requests
         """
     )
     
@@ -812,7 +890,27 @@ Examples:
         action='store_true',
         help='List all available named images'
     )
-    
+
+    # Network restriction options
+    network_group = parser.add_mutually_exclusive_group()
+    network_group.add_argument(
+        '-N', '--no-network',
+        action='store_true',
+        help='Run container with no network access (--network none)'
+    )
+    network_group.add_argument(
+        '--internal-network',
+        action='store_true',
+        help='Run container on internal network (no internet access)'
+    )
+
+    # Proxy configuration
+    parser.add_argument(
+        '--http-proxy',
+        metavar='URL',
+        help='Use HTTP proxy for container network access (e.g., http://proxy:3128)'
+    )
+
     # Parse just the flags
     parsed_args = parser.parse_args(flags)
     
@@ -843,7 +941,10 @@ def main():
     
     # Initialize volume mapper
     volume_mapper = VolumeMapper(runtime)
-    
+
+    # Initialize network manager
+    network_manager = NetworkManager(runtime)
+
     # Check if we need SSH mounts
     has_ssh_mounts = False
     if args.read_only:
@@ -943,6 +1044,14 @@ def main():
         else:
             args.read_write = saved_rw
         
+        # Apply saved network configuration (only if not overridden by user)
+        if not hasattr(args, 'no_network') or not args.no_network:
+            args.no_network = config.get('no_network', False)
+        if not hasattr(args, 'internal_network') or not args.internal_network:
+            args.internal_network = config.get('internal_network', False)
+        if not hasattr(args, 'http_proxy') or not args.http_proxy:
+            args.http_proxy = config.get('http_proxy')
+
         # Only use saved command if no command was provided by user
         if not args.command:
             args.command = config.get('command', [])
@@ -959,7 +1068,15 @@ def main():
     
     # Add port mappings
     run_args.extend(PortMapper.get_port_args(args))
-    
+
+    # Add network configuration
+    network_args, env_vars = network_manager.get_network_args(args)
+    run_args.extend(network_args)
+
+    # Add environment variables for proxy support
+    if env_vars:
+        run_args.extend(network_manager.format_env_args(env_vars))
+
     # Add image
     run_args.append(image)
     

@@ -48,7 +48,10 @@ class BaseTestCase(unittest.TestCase):
             'tmux': False,
             'port': None,
             'read_only': None,
-            'read_write': None
+            'read_write': None,
+            'no_network': False,
+            'internal_network': False,
+            'http_proxy': None
         }
         defaults.update(kwargs)
         
@@ -299,6 +302,55 @@ class TestConfigManager(BaseTestCase):
         saved = config_manager.config['images']['test-app']
         self.assertEqual(saved['command'], ['npm', 'run', 'dev'])
         self.assertEqual(saved['image_version'], '18')
+
+    def test_network_configuration_saving_and_loading(self):
+        """Test saving and loading network configuration options"""
+        config_manager = ConfigManager()
+
+        # Test no-network configuration
+        args_no_net = self.create_mock_args(
+            command=['python', 'offline.py'],
+            no_network=True,
+            py=True
+        )
+
+        result = config_manager.save_image_config('offline-app', args_no_net)
+        self.assertTrue(result)
+
+        saved = config_manager.get_image_config('offline-app')
+        self.assertTrue(saved['no_network'])
+        self.assertFalse(saved['internal_network'])
+        self.assertIsNone(saved['http_proxy'])
+
+        # Test internal network configuration
+        args_internal = self.create_mock_args(
+            command=['npm', 'test'],
+            internal_network=True,
+            node=True
+        )
+
+        result = config_manager.save_image_config('test-app', args_internal)
+        self.assertTrue(result)
+
+        saved = config_manager.get_image_config('test-app')
+        self.assertFalse(saved['no_network'])
+        self.assertTrue(saved['internal_network'])
+        self.assertIsNone(saved['http_proxy'])
+
+        # Test HTTP proxy configuration
+        args_proxy = self.create_mock_args(
+            command=['pip', 'install', 'requests'],
+            http_proxy='http://proxy.company.com:3128',
+            py=True
+        )
+
+        result = config_manager.save_image_config('proxy-app', args_proxy)
+        self.assertTrue(result)
+
+        saved = config_manager.get_image_config('proxy-app')
+        self.assertFalse(saved['no_network'])
+        self.assertFalse(saved['internal_network'])
+        self.assertEqual(saved['http_proxy'], 'http://proxy.company.com:3128')
 
 
 if __name__ == '__main__':
