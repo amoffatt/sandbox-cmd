@@ -68,6 +68,9 @@ Box auto-detects the container environment:
 - `-n, --name NAME` - Save this configuration as a named image
 - `-i, --image NAME` - Use a previously saved named image
 - `--force` - Overwrite existing named image without confirmation
+- `-N, --no-network` - Run with no network access (complete isolation)
+- `--internal-network` - Run with internal network only (no internet access)
+- `--http-proxy URL` - Use HTTP proxy for network requests
 
 **Note**: The first mounted directory becomes the working directory inside the container.
 
@@ -167,6 +170,32 @@ box --node                         # Node.js shell
 box --py                           # Python shell
 box -rw ~/projects -ro ~/data bash # With mounts
 ```
+
+### Network Restrictions
+
+Control container network access for security or testing:
+
+```bash
+# Complete network isolation (no network access)
+box -N python analyze_offline_data.py
+
+# Internal network only (containers can communicate, no internet)
+box --internal-network -rw . npm test
+
+# Use corporate HTTP proxy
+box --http-proxy http://proxy.company.com:3128 pip install requests
+
+# Combine with other options
+box -N -rw ~/secure_data python process.py  # Offline processing with data access
+
+# Save network-restricted configuration
+box -n secure-env -N --py -rw ~/data python  # Named image with no network
+```
+
+**Network Options:**
+- `--no-network` (`-N`): Complete network isolation, ideal for processing sensitive data offline
+- `--internal-network`: Allows container-to-container communication but blocks internet access
+- `--http-proxy`: Routes all HTTP/HTTPS traffic through specified proxy server
 
 ### Named Images
 
